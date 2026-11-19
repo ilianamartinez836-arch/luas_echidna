@@ -1,0 +1,41 @@
+local ffi = require("ffi")
+
+pcall(ffi.cdef, [[
+    void* GetModuleHandleA(const char* lpModuleName);
+    int VirtualProtect(void* lpAddress, size_t dwSize, unsigned long flNewProtect, unsigned long* lpflOldProtect);
+]])
+
+local engine = ffi.cast("uintptr_t", ffi.C.GetModuleHandleA("engine.dll"))
+if engine == 0 then return end
+
+local function read_int(addr)
+    if not addr or addr < 0x10000 then return nil end
+    local ok, val = pcall(function() return ffi.cast("int*", addr)[0] end)
+    return ok and val or nil
+end
+
+local function write_int_safe(addr, val)
+    if not addr or addr < 0x10000 then return false end
+    local old_protect = ffi.new("unsigned long[1]")
+    if ffi.C.VirtualProtect(ffi.cast("void*", addr), 4, 0x40, old_protect) ~= 0 then
+        local ok = pcall(function() ffi.cast("int*", addr)[0] = val end)
+        ffi.C.VirtualProtect(ffi.cast("void*", addr), 4, old_protect[0], old_protect)
+        return ok
+    end
+    return false
+end
+
+local function permachoke()
+    local client_state_ptr = read_int(engine + 4352236)
+    if not client_state_ptr or client_state_ptr == 0 then return end
+
+    local netchan = read_int(client_state_ptr + 24)
+    if not netchan or netchan == 0 then return end
+
+    write_int_safe(netchan + 16, -1)
+    write_int_safe(netchan + 28, 255)
+end
+
+function on_create_move(cmd, lp)
+    permachoke()
+end

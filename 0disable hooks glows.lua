@@ -1,0 +1,5 @@
+echidna_hooks.remove("ModelRender_DrawModelExecute")
+echidna_hooks.remove("StudioRender_ForcedMaterialOverride")
+echidna_hooks.remove("GetGlowColor")
+echidna_hooks.remove("ApplyEntityGlowEffects")
+echidna_hooks.remove("TerrorClientMode_DoPostScreenSpaceEffects")

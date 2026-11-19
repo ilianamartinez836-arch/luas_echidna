@@ -1,0 +1,204 @@
+-- Tank Rock ESP (Color fijo verde, sin relleno) — Echidna (L4D2)
+local INSTANCE = {}
+_G.echidna_tankrock_instance = INSTANCE
+
+local ROCK_CLASS, ROCK_MODEL, MIN_SPEED = "CBaseCSGrenadeProjectile", "concrete_chunk", 150
+local RING, ROCK_SIZE, THICK = 125, 40, 2
+
+local sqrt, max, floor = math.sqrt, math.max, math.floor
+local cos, sin, rad = math.cos, math.sin, math.rad
+local clock = (os and os.clock) or function() return GlobalVars.curtime() end
+
+local function clamp(v, lo, hi) if v < lo then return lo elseif v > hi then return hi end return v end
+
+local maxc = 32
+local rocks, hist = {}, {}
+local last_scan = -1
+
+local function scan(now)
+    last_scan = now
+    pcall(function() local m = EngineClient.GetMaxClients(); if type(m) == "number" and m > 0 then maxc = m end end)
+    local hi = 2048
+    pcall(function() hi = ClientEntityList.GetHighestEntityIndex() end)
+    if type(hi) ~= "number" or hi < 1 or hi > 4096 then hi = 2048 end
+    local seen, found = {}, {}
+    for i = maxc + 1, hi do
+        local ent
+        pcall(function() ent = ClientEntityList.GetClientEntity(i) end)
+        local cls
+        if ent then pcall(function() cls = ent:get_class_name() end) end
+        if cls == ROCK_CLASS then
+            local model, o, dormant = "", nil, false
+            pcall(function() model = ent:get_model_name() or "" end)
+            pcall(function() dormant = ent:is_dormant() end)
+            if not dormant and (model == "" or model:lower():find(ROCK_MODEL, 1, true)) then
+                pcall(function() o = ent:get_render_origin() end)
+            end
+            if o and type(o.x) == "number" then
+                local H = hist[i]
+                local vx, vy, vz, sp = 0, 0, 0, 0
+                if H and now - H.t <= 0.015 then
+                    seen[i] = H
+                    vx, vy, vz, sp = H.vx, H.vy, H.vz, H.sp
+                else
+                    if H and now - H.t < 0.5 then
+                        local dt = now - H.t
+                        vx, vy, vz = (o.x - H.x) / dt, (o.y - H.y) / dt, (o.z - H.z) / dt
+                        if H.sp then vx, vy, vz = 0.5 * vx + 0.5 * H.vx, 0.5 * vy + 0.5 * H.vy, 0.5 * vz + 0.5 * H.vz end
+                        sp = sqrt(vx * vx + vy * vy + vz * vz)
+                    end
+                    seen[i] = { x = o.x, y = o.y, z = o.z, t = now, vx = vx, vy = vy, vz = vz, sp = sp }
+                end
+                if sp >= MIN_SPEED then
+                    found[i] = { x = o.x, y = o.y, z = o.z, vx = vx, vy = vy, vz = vz }
+                end
+            end
+        end
+    end
+    hist, rocks = seen, found
+end
+
+local function screen_size()
+    local w, h
+    pcall(function()
+        local a, b = Draw.GetScreenSize()
+        if type(a) == "table" then w, h = a.w or a[1] or a.x, a.h or a[2] or a.y else w, h = a, b end
+    end)
+    if type(w) ~= "number" or w <= 0 then pcall(function() w, h = EngineClient.GetScreenSize() end) end
+    if type(w) ~= "number" or w <= 0 then return 1920, 1080 end
+    return w, h
+end
+
+local CAM, EYECAM = { t = -99 }, {}
+local prev_ov = on_override_view
+function on_override_view(ox, oy, oz, ax, ay, az, fov)
+    if prev_ov then pcall(prev_ov, ox, oy, oz, ax, ay, az, fov) end
+    if type(ox) == "number" and type(ax) == "number" then
+        CAM.x, CAM.y, CAM.z, CAM.p, CAM.yw, CAM.t = ox, oy, oz, ax, ay, clock()
+        if type(fov) == "number" and fov > 10 and fov < 170 then CAM.fov = fov end
+    end
+end
+
+local function fov_now()
+    if CAM.fov and clock() - CAM.t < 0.5 then return CAM.fov end
+    local f
+    pcall(function() f = Cvars.FindVar("fov_desired"):GetFloat() end)
+    if type(f) ~= "number" or f < 10 or f > 170 then f = 90 end
+    return f
+end
+
+local function project(x, y, z)
+    local c = (clock() - CAM.t < 0.5) and CAM or EYECAM
+    if not c.x then return nil end
+    local p, yw = rad(c.p), rad(c.yw)
+    local dx, dy, dz = x - c.x, y - c.y, z - c.z
+    local zf = dx * cos(p) * cos(yw) + dy * cos(p) * sin(yw) - dz * sin(p)
+    if zf < 1 then return nil end
+    local xr = dx * sin(yw) - dy * cos(yw)
+    local yu = dx * sin(p) * cos(yw) + dy * sin(p) * sin(yw) + dz * cos(p)
+    local sw, sh = screen_size()
+    local focal = (sh / 2) / (math.tan(rad(fov_now()) / 2) * 0.75)
+    return sw / 2 + xr / zf * focal, sh / 2 - yu / zf * focal
+end
+
+local function w2s(x, y, z)
+    local a, b
+    pcall(function() a, b = visual.world_to_screen(x, y, z) end)
+    if type(a) == "table" then a, b = a.x or a[1], a.y or a[2] end
+    if type(a) == "number" and type(b) == "number" and a == a and b == b then return a, b end
+    return project(x, y, z)
+end
+
+local function ln(x1, y1, x2, y2, r, g, b, a, th) imgui.fg_draw_line(x1, y1, x2, y2, r, g, b, a, th) end
+
+local function ring_at(sx, sy, radius, r, g, b, a, th)
+    local n = radius > 40 and 40 or 28
+    local px, py = sx + radius, sy
+    for i = 1, n do
+        local t = i / n * 6.2831853
+        local qx, qy = sx + cos(t) * radius, sy + sin(t) * radius
+        ln(px, py, qx, qy, r, g, b, a, th)
+        px, py = qx, qy
+    end
+end
+
+local function outline(x, y, z, rx, ry, r, g, b)
+    local sx, sy = w2s(x, y, z)
+    if not sx then return end
+    local half = ROCK_SIZE / 2
+    local ex, ey = w2s(x + rx * half, y + ry * half, z)
+    local fx, fy = w2s(x, y, z + half)
+    local radius = 0
+    if ex then radius = sqrt((ex - sx) ^ 2 + (ey - sy) ^ 2) end
+    if fx then radius = max(radius, sqrt((fx - sx) ^ 2 + (fy - sy) ^ 2)) end
+    radius = clamp(radius, 6, 400)
+    ring_at(sx, sy, radius + THICK * 3, r, g, b, 0.15, THICK + 2)
+    ring_at(sx, sy, radius + THICK * 1.5, r, g, b, 0.35, THICK + 1)
+    ring_at(sx, sy, radius, r, g, b, 1.0, THICK)
+end
+
+local text_mode = "-"
+local function label_at(x, y, r, g, b, s)
+    if text_mode ~= "draw" and pcall(imgui.fg_draw_text, x, y, r, g, b, 1.0, s) then text_mode = "imgui"; return end
+    if pcall(function()
+        local w = #s * 7
+        pcall(function() local tw = Draw.GetTextWidth(0, s); if type(tw) == "number" and tw > 0 then w = tw end end)
+        Draw.String(0, floor(x - w / 2), floor(y), floor(r * 255), floor(g * 255), floor(b * 255), 255, 0, s)
+    end) then text_mode = "draw" end
+end
+
+local function draw_rocks()
+    if _G.echidna_tankrock_instance ~= INSTANCE then return end
+    local in_game = false
+    pcall(function() in_game = EngineClient.IsInGame() end)
+    if not in_game then return end
+    local lp
+    pcall(function() lp = EntityCache.GetLocal() end)
+    if not lp then return end
+    local alive = false
+    pcall(function() alive = lp:is_alive() end)
+    if not alive then return end
+
+    local now = clock()
+    local eye, ang
+    pcall(function() eye = lp:EyePosition(); ang = lp:get_eye_angles() end)
+    if not eye or not ang then return end
+    EYECAM.x, EYECAM.y, EYECAM.z, EYECAM.p, EYECAM.yw = eye.x, eye.y, eye.z, ang.x, ang.y
+    if now - last_scan >= 0.03 then scan(now) end
+
+    local sw, sh = screen_size()
+    local cx, cy = sw / 2, sh / 2
+    local pit, yaw = rad(ang.x), rad(ang.y)
+    local rx, ry = sin(yaw), -cos(yaw)
+    local ux, uy, uz = sin(pit) * cos(yaw), sin(pit) * sin(yaw), cos(pit)
+
+    -- Color fijo unico: Verde puro
+    local r, g, b = 0.0, 1.0, 0.3
+
+    for _, rk in pairs(rocks) do
+        local dx, dy, dz = rk.x - eye.x, rk.y - eye.y, rk.z - eye.z
+        local d = sqrt(dx * dx + dy * dy + dz * dz)
+        local lbl = string.format("ROCK %.0fm", d / 52.5)
+
+        local sx, sy = w2s(rk.x, rk.y, rk.z)
+        if sx and sx > 0 and sx < sw and sy > 0 and sy < sh then
+            pcall(outline, rk.x, rk.y, rk.z, rx, ry, r, g, b)
+            label_at(sx, sy - 34, r, g, b, lbl)
+        end
+    end
+end
+
+local prev_end = on_end_scene
+function on_end_scene()
+    if prev_end then pcall(prev_end) end
+    if _G.echidna_tankrock_instance ~= INSTANCE then return end
+    pcall(draw_rocks)
+end
+
+function on_unload()
+    rocks = {}
+    hist = {}
+    client.print("[TankRock] Descargado.")
+end
+
+client.print("[TankRock] Cargado (Color verde fijo, sin relleno).")
